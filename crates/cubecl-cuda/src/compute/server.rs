@@ -3,7 +3,7 @@ use crate::{
     CudaCompiler,
     compute::{
         command::Command,
-        communication::{get_nccl_comm_id, get_nccl_dtype_count, to_nccl_op},
+        communication::{get_nccl_comm_id, get_nccl_dtype_count, global_placement, to_nccl_op},
         context::CudaContext,
         graph::CudaGraph,
         stream::{CudaStreamBackend, StreamCaptureState},
@@ -703,10 +703,12 @@ impl ServerCommunication for CudaServer {
             let mut comm = MaybeUninit::uninit();
             let mut device_ids = device_ids.clone();
             device_ids.sort();
-            let rank = device_ids
+            let local_rank = device_ids
                 .iter()
                 .position(|id| id.index_id == self.device_id.index_id)
                 .expect("Device's peer id should be in the list of device ids.");
+            let (rank_offset, world_size) = global_placement(device_ids.len());
+            let rank = rank_offset + local_rank;
             let nccl_comm_id = get_nccl_comm_id(device_ids.clone());
 
             // SAFETY: `comm` is a valid `MaybeUninit`. `nccl_comm_id` is a unique communicator ID
@@ -715,7 +717,7 @@ impl ServerCommunication for CudaServer {
             unsafe {
                 cudarc::nccl::result::comm_init_rank(
                     comm.as_mut_ptr(),
-                    device_ids.len() as i32,
+                    world_size as i32,
                     nccl_comm_id,
                     rank as i32,
                 )
