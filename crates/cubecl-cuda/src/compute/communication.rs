@@ -11,7 +11,37 @@ use cubecl_environment::sync::Mutex;
 static UNIQUE_IDS_MAP: OnceLock<Mutex<HashMap<CommunicationId, cudarc::nccl::sys::ncclUniqueId>>> =
     OnceLock::new();
 
+/// Hex-encoded [`cudarc::nccl::sys::ncclUniqueId`] shared by every process in a multi-process job.
+pub const UNIQUE_ID_VAR: &str = "CUBECL_NCCL_UNIQUE_ID";
+/// Index of this process among [`WORLD_PROCESSES_VAR`] processes.
+pub const PROCESS_RANK_VAR: &str = "CUBECL_PROCESS_RANK";
+/// Number of processes taking part in the collective.
+pub const WORLD_PROCESSES_VAR: &str = "CUBECL_WORLD_PROCESSES";
+
+/// Placement of this process inside a collective that spans several processes.
+///
+/// `local_devices` is the number of devices this process owns. Every process must own the same
+/// number, because the rank of a device is its local position offset by the process rank.
+///
+/// Both values fall back to a single process that owns every device in the group.
+pub(crate) fn global_placement(local_devices: usize) -> (usize, usize) {
+    let process_rank = env_usize(PROCESS_RANK_VAR).unwrap_or(0);
+    let world_processes = env_usize(WORLD_PROCESSES_VAR).unwrap_or(1);
+    (
+        process_rank * local_devices,
+        world_processes * local_devices,
+    )
+}
+
+fn env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok()?.parse().ok()
+}
+
 pub(crate) fn get_nccl_comm_id(device_ids: Vec<DeviceId>) -> cudarc::nccl::sys::ncclUniqueId {
+    if let Some(id) = unique_id_from_env() {
+        return id;
+    }
+
     let mut unique_ids_map = UNIQUE_IDS_MAP.get_or_init(Default::default).lock();
     let comm_id = CommunicationId::from(device_ids);
     match unique_ids_map.get_mut(&comm_id) {
@@ -22,6 +52,37 @@ pub(crate) fn get_nccl_comm_id(device_ids: Vec<DeviceId>) -> cudarc::nccl::sys::
             id
         }
     }
+}
+
+/// NCCL embeds rank 0's bootstrap address in the unique ID, so a process cannot generate an ID that
+/// another process can join. Rank 0 must publish the ID it created, and every other process must
+/// receive it through [`UNIQUE_ID_VAR`].
+fn unique_id_from_env() -> Option<cudarc::nccl::sys::ncclUniqueId> {
+    let hex = std::env::var(UNIQUE_ID_VAR).ok()?;
+    let bytes = decode_hex(&hex)
+        .unwrap_or_else(|| panic!("{UNIQUE_ID_VAR} must be hex, got {} chars", hex.len()));
+    assert_eq!(
+        bytes.len(),
+        128,
+        "{UNIQUE_ID_VAR} must decode to 128 bytes, got {}",
+        bytes.len()
+    );
+
+    let mut id = cudarc::nccl::sys::ncclUniqueId { internal: [0; 128] };
+    for (slot, byte) in id.internal.iter_mut().zip(bytes) {
+        *slot = byte as _;
+    }
+    Some(id)
+}
+
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
 }
 
 pub(crate) fn to_nccl_op(op: ReduceOperation) -> cudarc::nccl::sys::ncclRedOp_t {
