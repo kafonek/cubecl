@@ -842,7 +842,16 @@ mod custom_channel {
     use std::{sync::Arc, vec::Vec};
 
     /// Maximum number of [`Task`] that can be queued.
-    pub const CHANNEL_MAX_TASK: usize = 32;
+    ///
+    /// DIAGNOSTIC PROBE, not a fix: bumped 32 -> 256 to test whether the multi-GPU DDP hang is
+    /// this ring buffer filling up while its consumer (the device's own server thread) is
+    /// blocked waiting on a collective's peers, which stalls the producer's `enqueue` in
+    /// `custom_channel` (see the spin/yield/sleep retry loop below) and, since the producer is
+    /// burn's single cross-device sync thread, freezes every other device's queue too. A wider
+    /// buffer only widens the window before the same deadlock recurs; it does not fix the
+    /// blocking enqueue. If the hang rate collapses with this change, the mechanism is
+    /// confirmed; if it does not move, the mechanism is wrong.
+    pub const CHANNEL_MAX_TASK: usize = 256;
 
     /// Number of `spin_loop` iterations before the server starts yielding.
     /// Gives a hot window to absorb back-to-back submits without any syscall.
