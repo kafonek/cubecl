@@ -834,6 +834,7 @@ mod custom_channel {
             task::{ArenaSlot, GLOBAL_TASK_MAX_SIZE, Task},
         },
     };
+    use crate::device::occupancy;
     use core::{
         hint::spin_loop,
         sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering},
@@ -927,6 +928,9 @@ mod custom_channel {
             loop {
                 let index = self.state.available_index.fetch_add(1, Ordering::Acquire) as usize;
                 if index >= CHANNEL_MAX_TASK {
+                    if idle_count == 0 {
+                        occupancy::record_full_wait(self.state.runner_id.device.index_id);
+                    }
                     // The queue is full; back off until the server flushes/swaps buffers.
                     if idle_count < SPIN_BUDGET_CLIENT {
                         spin_loop();
@@ -941,6 +945,11 @@ mod custom_channel {
 
                 self.state.init_task_at(index, func);
                 self.state.enqueued_count.fetch_add(1, Ordering::SeqCst);
+                occupancy::record_enqueue(
+                    self.state.runner_id.device.index_id,
+                    index,
+                    CHANNEL_MAX_TASK,
+                );
                 return Ok(());
             }
         }
@@ -1154,6 +1163,7 @@ mod custom_channel {
         /// Swaps the client and server buffers, allowing the client to start
         /// filling the next buffer while the server processes the current one.
         fn fetch(&mut self) {
+            occupancy::record_swap(self.state.runner_id.device.index_id);
             self.client_buf = 1 - self.client_buf;
 
             self.state.queue_ptr.store(

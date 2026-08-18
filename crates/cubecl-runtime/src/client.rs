@@ -32,6 +32,8 @@ use cubecl_environment::future::DynFut;
 use cubecl_ir::{DeviceProperties, ElemType, VectorSize, features::Features};
 use cubecl_zspace::Shape;
 
+#[cfg(feature = "std")]
+use cubecl_common::device::occupancy;
 #[allow(unused)]
 use cubecl_common::profile::TimingMethod;
 use cubecl_environment::stream::StreamId;
@@ -763,6 +765,9 @@ impl<R: Runtime> ComputeClient<R> {
         }
         let stream_id = self.stream_id();
 
+        #[cfg(feature = "std")]
+        occupancy::mark_round(self.device.device_id().index_id);
+
         self.device.submit(move |server| {
             server.sync_collective(stream_id).unwrap();
         });
@@ -794,6 +799,9 @@ impl<R: Runtime> ComputeClient<R> {
         let dst = dst.binding();
 
         self.ensure_init_collective(device_ids.clone());
+
+        #[cfg(feature = "std")]
+        occupancy::record_collective(self.device.device_id().index_id);
 
         self.device.submit(move |server| {
             server
