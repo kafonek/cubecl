@@ -800,6 +800,16 @@ impl<R: Runtime> ComputeClient<R> {
                 .all_reduce(src, dst, dtype, stream_id, op, device_ids)
                 .unwrap();
         });
+
+        // `ServerCommunication::all_reduce` is blocking: it waits for every peer to issue the
+        // matching collective. An unflushed task is invisible to its own server until the queue
+        // happens to fill, and each device's queue fills at its own rate from unrelated kernel
+        // traffic, so leaving the collective queued lets one rank enter the collective while a
+        // peer's is still sitting in a partially filled buffer, and neither can proceed. Flushing
+        // hands it over immediately, so every rank of a round is issued before any can block on
+        // the others. Same reasoning as `to_client_tensor`'s send/recv pair. The transfer itself
+        // still runs asynchronously on the communication stream.
+        self.device.flush_queue();
     }
 
     /// Transfer data from one client to another
