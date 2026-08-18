@@ -744,12 +744,30 @@ impl<R: Runtime> ComputeClient<R> {
     )]
     pub fn ensure_init_collective(&mut self, device_ids: Vec<DeviceId>) {
         let comm_id = CommunicationId::from(device_ids.clone());
-        let is_comms_init = self.utilities.initialized_comms.read().contains(&comm_id);
-        if !is_comms_init {
+        // COMMINT-RACE-FIX: the check and the insert now happen under ONE write-lock
+        // acquisition, so `HashSet::insert`'s return value (true iff this call was the one
+        // that transitioned absent -> present) is the atomic test-and-set this needs.
+        // Previously the check held only a READ lock, then dropped it, then a SEPARATE
+        // write-lock acquisition inserted the id right after SUBMITTING comm_init -- not
+        // after it completed. A second caller could observe "initialized" in the gap between
+        // the first caller's submit and its insert, and skip submitting its own comm_init on
+        // its own device queue even though comm_init had not actually run anywhere yet.
+        // Holding the write lock across the whole test-and-set closes that window without
+        // adding blocking: the lock only guards a HashSet insert, not the async `submit`, so
+        // `flush_queue`'s "don't block other devices" intent (see below) is unchanged.
+        let comm_id_val = comm_id.id;
+        let did_insert = self.utilities.initialized_comms.write().insert(comm_id);
+        // COMMINT-RACE-PROOF (kept from the instrumentation build): log which branch this call
+        // takes, per device, per comm.
+        log::info!(
+            "commint_race_probe device_id={:?} comm_id={} branch={}",
+            self.device.device_id(),
+            comm_id_val,
+            if did_insert { "submit" } else { "skip" },
+        );
+        if did_insert {
             self.device
                 .submit(move |server| server.comm_init(device_ids).unwrap());
-            let mut initialized_comms = self.utilities.initialized_comms.write();
-            initialized_comms.insert(comm_id);
             // Flush immediately so other devices aren't blocked waiting on this initialization.
             self.device.flush_queue();
         }
