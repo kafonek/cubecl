@@ -745,6 +745,14 @@ impl<R: Runtime> ComputeClient<R> {
     pub fn ensure_init_collective(&mut self, device_ids: Vec<DeviceId>) {
         let comm_id = CommunicationId::from(device_ids.clone());
         let is_comms_init = self.utilities.initialized_comms.read().contains(&comm_id);
+        // COMMINT-RACE-PROOF (instrumentation only, no fix): log which branch this call takes,
+        // per device, per comm.
+        log::info!(
+            "commint_race_probe device_id={:?} comm_id={} branch={}",
+            self.device.device_id(),
+            comm_id.id,
+            if is_comms_init { "skip" } else { "submit" },
+        );
         if !is_comms_init {
             self.device
                 .submit(move |server| server.comm_init(device_ids).unwrap());
