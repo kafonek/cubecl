@@ -1011,6 +1011,7 @@ mod custom_channel {
             let actual_added = index_end - index_start;
             self.enqueued_count
                 .fetch_add(actual_added as u32, Ordering::SeqCst);
+            occupancy::record_flush(self.runner_id.device.index_id, index_start, actual_added);
         }
 
         /// Initializes the task at `index` in the current queue with `func`.
@@ -1154,9 +1155,12 @@ mod custom_channel {
 
         fn execute_tasks(&mut self) {
             let server_buf = 1 - self.client_buf;
+            let mut executed = 0usize;
             for task in &mut self.buffers[server_buf].tasks {
                 task.run();
+                executed += 1;
             }
+            occupancy::record_drain(self.state.runner_id.device.index_id, executed);
             self.ready_to_execute = false;
         }
 

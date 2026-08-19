@@ -33,6 +33,21 @@ counters_u64!(ENQUEUED_AT_LAST_ROUND);
 counters_u64!(COLLECTIVES_AT_LAST_ROUND);
 counters_u64!(FULL_WAITS_AT_LAST_ROUND);
 
+// Drain side: what the server thread actually executes, and how much of it is padding.
+//
+// `flush` fills every remaining slot with no-ops so the buffer reaches capacity and the server
+// swaps it in, and the server then runs every slot. A flush at occupancy k therefore makes the
+// server execute `capacity - k` no-ops. PADDED is that waste, and it is the quantity that should
+// grow with the buffer size.
+counters_u64!(DRAINED);
+counters_u64!(PADDED);
+counters_u64!(FLUSHES);
+counters_u64!(OCCUPANCY_AT_FLUSH_SUM);
+counters_u64!(DRAINED_AT_LAST_ROUND);
+counters_u64!(PADDED_AT_LAST_ROUND);
+counters_u64!(FLUSHES_AT_LAST_ROUND);
+counters_u64!(OCCUPANCY_AT_FLUSH_SUM_AT_LAST_ROUND);
+
 /// Deepest slot index a real (non-padding) task has been written to, per device.
 static PEAK_INDEX: [AtomicU32; MAX_DEVICES] = [const { AtomicU32::new(0) }; MAX_DEVICES];
 
@@ -109,6 +124,25 @@ pub fn record_collective(device_index: u16) {
     }
 }
 
+/// Records one flush of `device_index`'s buffer: how full it was, and how many no-op slots the
+/// flush had to add to reach capacity.
+///
+/// `padded` is wasted work by construction — the server executes those slots.
+pub fn record_flush(device_index: u16, occupancy: usize, padded: usize) {
+    if let Some(i) = slot(device_index) {
+        FLUSHES[i].fetch_add(1, Ordering::Relaxed);
+        PADDED[i].fetch_add(padded as u64, Ordering::Relaxed);
+        OCCUPANCY_AT_FLUSH_SUM[i].fetch_add(occupancy as u64, Ordering::Relaxed);
+    }
+}
+
+/// Records one buffer's worth of tasks executed by `device_index`'s server thread.
+pub fn record_drain(device_index: u16, executed: usize) {
+    if let Some(i) = slot(device_index) {
+        DRAINED[i].fetch_add(executed as u64, Ordering::Relaxed);
+    }
+}
+
 /// Marks the end of one synchronized round on `device_index` and logs what the round cost.
 ///
 /// The deltas are what size a buffer against: `enqueued` is every task the round put in the
@@ -130,10 +164,30 @@ pub fn mark_round(device_index: u16) {
     let full_waits_delta =
         full_waits - FULL_WAITS_AT_LAST_ROUND[i].swap(full_waits, Ordering::Relaxed);
 
+    let drained = DRAINED[i].load(Ordering::Relaxed);
+    let padded = PADDED[i].load(Ordering::Relaxed);
+    let flushes = FLUSHES[i].load(Ordering::Relaxed);
+    let occ_sum = OCCUPANCY_AT_FLUSH_SUM[i].load(Ordering::Relaxed);
+
+    let drained_delta = drained - DRAINED_AT_LAST_ROUND[i].swap(drained, Ordering::Relaxed);
+    let padded_delta = padded - PADDED_AT_LAST_ROUND[i].swap(padded, Ordering::Relaxed);
+    let flushes_delta = flushes - FLUSHES_AT_LAST_ROUND[i].swap(flushes, Ordering::Relaxed);
+    let occ_sum_delta =
+        occ_sum - OCCUPANCY_AT_FLUSH_SUM_AT_LAST_ROUND[i].swap(occ_sum, Ordering::Relaxed);
+
+    // Mean buffer occupancy at the moment of a flush. Low means flushes are padding heavily, which
+    // is the drain-side cost of a buffer larger than a round's burst.
+    let occ_at_flush = if flushes_delta > 0 {
+        occ_sum_delta as f64 / flushes_delta as f64
+    } else {
+        f64::NAN
+    };
+
     log::info!(
         "chanocc round device={device_index} round={round} enqueued={enqueued_delta} \
          collectives={collectives_delta} full_waits={full_waits_delta} \
-         peak_slot_index={} swaps={}",
+         drained={drained_delta} padded={padded_delta} flushes={flushes_delta} \
+         mean_occupancy_at_flush={occ_at_flush:.1} peak_slot_index={} swaps={}",
         PEAK_INDEX[i].load(Ordering::Relaxed),
         SWAPS[i].load(Ordering::Relaxed),
     );
