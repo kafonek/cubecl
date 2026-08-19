@@ -842,7 +842,15 @@ mod custom_channel {
     use std::{sync::Arc, vec::Vec};
 
     /// Maximum number of [`Task`] that can be queued.
-    pub const CHANNEL_MAX_TASK: usize = 32;
+    ///
+    /// DIAGNOSTIC PROBE, not a proposal: 32 -> 8. A deeper buffer (256) makes the multi-GPU DDP
+    /// deadlock MORE likely at 2 devices, not less, and moves the stall from round 2 to round 1.
+    /// If hand-off of a collective depends on the buffer filling, a SHALLOWER buffer should hand
+    /// collectives over sooner and be safer at low device counts. This tests that direction.
+    ///
+    /// Note the spin budgets below are derived from this constant, so they shrink with it; the
+    /// probe changes back-off behaviour as well as capacity.
+    pub const CHANNEL_MAX_TASK: usize = 8;
 
     /// Number of `spin_loop` iterations before the server starts yielding.
     /// Gives a hot window to absorb back-to-back submits without any syscall.
@@ -1273,7 +1281,7 @@ mod tests {
         // Wait for tasks to complete. Miri is very slow with this test, so sleeping fails here.
         let _ = handle.submit_blocking(|_| {});
 
-        assert_eq!(completed_count.load(Ordering::SeqCst), 32);
+        assert_eq!(completed_count.load(Ordering::SeqCst), CHANNEL_MAX_TASK);
     }
 
     #[test]
